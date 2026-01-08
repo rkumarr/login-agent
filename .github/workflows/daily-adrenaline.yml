@@ -1,0 +1,101 @@
+name: Daily Adrenaline Automation
+
+on:
+  schedule:
+    # 9:00 AM IST (3:30 AM UTC) - Target window 9:01-9:30
+    - cron: '30 3 * * 1-5'
+    # 7:00 PM IST (1:30 PM UTC) - Target window 19:01-19:30
+    - cron: '30 13 * * 1-5'
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Action to perform'
+        required: true
+        default: 'auto'
+        type: choice
+        options: [auto, clockin, clockout]
+
+env:
+  TARGET_URL: ${{ secrets.TARGET_URL }}
+  LOGIN_USERNAME: ${{ secrets.LOGIN_USERNAME }}
+  LOGIN_PASSWORD: ${{ secrets.LOGIN_PASSWORD }}
+  HEADLESS: true
+
+jobs:
+  adrenaline-automation:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+        cache: 'npm'
+        
+    - name: Install dependencies
+      run: npm ci
+      
+    - name: Install Playwright browsers
+      run: npx playwright install chromium --with-deps
+
+    - name: Precisely Timed Delay
+      if: github.event_name == 'schedule'
+      run: |
+        # Wait at least 65 seconds to ensure we are past the 01-minute mark
+        # Then add a random delay up to 15 minutes (900s) to stay safe under the 30-min limit
+        fixed_delay=65
+        random_delay=$(( (RANDOM % 900) + 1 ))
+        total_delay=$(( fixed_delay + random_delay ))
+        echo "Waiting for $total_delay seconds to land in the target window..."
+        sleep $total_delay
+        
+    - name: Check for holidays and determine action
+      id: determine-action
+      run: |
+        HOLIDAYS="2026-01-15 2026-01-26 2026-02-16 2026-03-19 2026-05-01 2026-06-02 2026-09-14 2026-10-02 2026-10-21 2026-11-08 2026-12-25"
+        current_date=$(TZ='Asia/Kolkata' date +%Y-%m-%d)
+        
+        if echo "$HOLIDAYS" | grep -q "$current_date"; then
+          echo "🎉 Holiday ($current_date) - skipping"
+          echo "action=skip" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+        
+        if [ "${{ github.event.inputs.action }}" != "" ] && [ "${{ github.event.inputs.action }}" != "auto" ]; then
+          echo "action=${{ github.event.inputs.action }}" >> $GITHUB_OUTPUT
+        else
+          current_hour=$(TZ='Asia/Kolkata' date +%H)
+          # Window: 9 AM or 10 AM (catches late starts)
+          if [ $current_hour -ge 9 ] && [ $current_hour -lt 12 ]; then
+            echo "action=clockin" >> $GITHUB_OUTPUT
+          # Window: 7 PM (19) or 8 PM (20)
+          elif [ $current_hour -ge 19 ] && [ $current_hour -lt 22 ]; then
+            echo "action=clockout" >> $GITHUB_OUTPUT
+          else
+            echo "action=auto" >> $GITHUB_OUTPUT
+          fi
+        fi
+        
+    - name: Run Adrenaline Agent
+      run: |
+        ACTION="${{ steps.determine-action.outputs.action }}"
+        if [ "$ACTION" = "skip" ]; then
+          exit 0
+        elif [ "$ACTION" = "clockin" ]; then
+          npm run clockin
+        elif [ "$ACTION" = "clockout" ]; then
+          npm run clockout  
+        else
+          npm run agent
+        fi
+        
+    - name: Upload screenshots on failure
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: failure-screenshots-${{ github.run_number }}
+        path: test-results/
+        retention-days: 7
